@@ -1,0 +1,90 @@
+#!/bin/bash
+# Jexactyl Auto Installer
+# Tested on Ubuntu 22.04
+# Usage: bash <(curl -s https://raw.githubusercontent.com/YourGitHubUser/JexactylInstaller/main/install.sh)
+
+set -e
+
+# --------- USER CONFIGURATION ---------
+ADMIN_EMAIL="admin@example.com"
+ADMIN_PASSWORD="root99"
+DOMAIN="yourdomain.com"
+DB_NAME="jexactyl"
+DB_USER="jexactyluser"
+DB_PASS="password123"
+# --------------------------------------
+
+echo "🚀 Updating system..."
+apt update && apt upgrade -y
+
+echo "📦 Installing dependencies..."
+apt install -y software-properties-common curl unzip git mariadb-server mariadb-client nginx php-cli php-fpm php-mysql php-gd php-curl php-mbstring php-xml php-bcmath php-tokenizer php-zip redis-server nodejs npm yarn composer unzip git certbot python3-certbot-nginx
+
+echo "🛠 Setting up MariaDB..."
+mysql -e "CREATE DATABASE ${DB_NAME}; CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}'; GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;"
+
+echo "📥 Downloading Jexactyl Panel..."
+cd /var/www/
+git clone https://github.com/jexactyl/jexactyl.git jexactyl
+cd jexactyl
+
+echo "🔧 Installing PHP dependencies..."
+composer install --no-dev --optimize-autoloader
+
+echo "🔑 Setting permissions..."
+chown -R www-data:www-data /var/www/jexactyl
+chmod -R 755 /var/www/jexactyl
+
+echo "📄 Setting up environment..."
+cp .env.example .env
+sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
+sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
+sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=${DB_PASS}/" .env
+
+echo "🔑 Generating application key..."
+php artisan key:generate
+
+echo "🗄 Running migrations and seeding..."
+php artisan migrate --seed
+
+echo "📦 Installing Node dependencies..."
+npm install
+npm run build:production
+
+echo "🌐 Setting up Nginx..."
+cat > /etc/nginx/sites-available/jexactyl <<EOL
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    root /var/www/jexactyl/public;
+    index index.php;
+
+    location / {
+        try_files \$uri /index.php\$is_args\$args;
+    }
+
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}
+EOL
+
+ln -s /etc/nginx/sites-available/jexactyl /etc/nginx/sites-enabled/
+nginx -t
+systemctl restart nginx
+
+echo "🔒 Installing SSL with Certbot..."
+certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos -m ${ADMIN_EMAIL}
+
+echo "✅ Creating default admin user..."
+php artisan user:create --email=${ADMIN_EMAIL} --password=${ADMIN_PASSWORD} --admin
+
+echo "🎉 Jexactyl Panel installation complete!"
+echo "Access your panel at: https://${DOMAIN}"
+echo "Admin login email: ${ADMIN_EMAIL} | Password: ${ADMIN_PASSWORD}"
